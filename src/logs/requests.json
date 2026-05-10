@@ -1,0 +1,26 @@
+[
+  {
+    "timestamp": "2026-05-10T11:54:30.863443",
+    "lat": 55.751244,
+    "lon": 37.618423,
+    "input": {
+      "total_room_count": 3,
+      "total_square": 60.0,
+      "kitchen_square": 8.0,
+      "life_square": 42.0,
+      "balcony_count": 2,
+      "is_apartment": 0,
+      "storey": 2,
+      "storeys_count": 12,
+      "bathroom_count": 1,
+      "elevator_count": 2,
+      "lat": 55.751244,
+      "lon": 37.618423,
+      "apartment_condition": "среднее состояние",
+      "built_year": 1980,
+      "building_batch_name": null
+    },
+    "error": "[Errno 2] No such file or directory: 'C:\\\\Users\\\\pc\\\\Dropbox\\\\ПК\\\\Desktop\\\\iep_calculator\\\\{}\\\\iep_calculator\\\\data\\\\geo\\\\moscow.geojson'",
+    "status": "error"
+  }
+]

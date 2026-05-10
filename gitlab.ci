@@ -1,0 +1,13 @@
+stages:
+  - lint
+
+lint:
+  stage: lint
+  image: python:3.13
+  before_script:
+    - pip install ruff black isort
+  script:
+    - ruff check .
+    - ruff format --check .
+    - black --check .
+    - isort --check-only .

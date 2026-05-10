@@ -1,0 +1,28 @@
+# env files
+.env
+.env.*
+
+!default.env
+
+# data
+*.ipynb
+*.xlsx
+*.csv
+*.csv.gz
+*.parquet
+*.log
+
+# api logs
+/logs
+
+# python
+__pycache__/
+
+# IDE
+.idea/
+
+.venv/
+venv/
+
+# catboost
+catboost_info/
