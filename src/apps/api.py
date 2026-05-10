@@ -792,7 +792,7 @@ document.getElementById("form").onsubmit = async (e) => {{
 
     if (!res.ok) {{
       const msgs = Array.isArray(r.detail) ? r.detail : [r.detail || "Неизвестная ошибка"];
-      errorList.innerHTML = msgs.map(m => `<li>${{m}}</li>`).join("");
+      errorList.innerHTML = msgs.map(m => '<li>' + m + '</li>').join("");
       errorBox.style.display = "block";
     }} else {{
       document.getElementById("r-sqm").textContent = fmt(r.price_per_m2, 1000);
@@ -800,7 +800,7 @@ document.getElementById("form").onsubmit = async (e) => {{
       resultCard.style.display = "block";
     }}
   }} catch (err) {{
-    errorList.innerHTML = `<li>Ошибка соединения: ${{err.message}}</li>`;
+    errorList.innerHTML = '<li>Ошибка соединения: ' + err.message + '</li>';
     errorBox.style.display = "block";
   }} finally {{
     btn.disabled = false;

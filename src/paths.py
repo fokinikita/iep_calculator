@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from settings.base_settings import base_settings
 
 BASE_PATH = Path(base_settings.PROJECT_PATH)
