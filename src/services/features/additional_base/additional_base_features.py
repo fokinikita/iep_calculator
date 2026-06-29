@@ -6,7 +6,6 @@ import polars as pl
 
 @attr.attrs(slots=True, auto_attribs=True)
 class AdditionalBaseFeaturesService:
-
     features: pl.DataFrame
     additional_base_features_names: List[str] = attr.attrib(init=False, default=None)
 

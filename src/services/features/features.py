@@ -5,8 +5,9 @@ import attr
 import polars as pl
 
 import config_features
-from services.features.additional_base.additional_base_features import \
-    AdditionalBaseFeaturesService
+from services.features.additional_base.additional_base_features import (
+    AdditionalBaseFeaturesService,
+)
 from services.features.geo.geo_features import GeoFeaturesService
 from services.features.nlp.nlp_features import NLPFeaturesService
 
