@@ -12,6 +12,10 @@
 *.parquet
 *.log
 
+# but keep the hedonic price-index data the app serves
+!data/index_iep/
+!data/index_iep/*.parquet
+
 # api logs
 logs/
 

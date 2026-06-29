@@ -33,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 MODEL_PATH = BASE_DIR / "data/models_iep/model_2026_05_04.cbm"
 FEATURES_NAMES_PATH = BASE_DIR / "data/features_iep/features_meta.json"
+INDEX_PATH = BASE_DIR / "data/index_iep/hedonic_index.parquet"
 
 TMP_LOG_PATH = Path("logs/requests_tmp.jsonl")  # written per-request while app runs
 PERSISTENT_LOG_PATH = Path("logs/requests.json")  # written on shutdown only
@@ -65,6 +66,20 @@ model.load_model(MODEL_PATH)
 continous_features, categorical_features = pl.read_json(FEATURES_NAMES_PATH)
 continous_features = continous_features.item().to_list()
 categorical_features = categorical_features.item().to_list()
+
+# Hedonic price index: shown from 2025-06 onwards, rebased so 2025-06 = 100.
+_index_df = pl.read_parquet(INDEX_PATH).filter(pl.col("year_month") >= "2025_06")
+_index_base = _index_df["price_sq_forecast"][0]
+_index_df = _index_df.with_columns(
+    (100 * pl.col("price_sq_forecast") / _index_base).alias("index")
+)
+INDEX_PAYLOAD = {
+    "periods": [p.replace("_", "-") for p in _index_df["year_month"].to_list()],
+    "index": [round(v, 2) for v in _index_df["index"].to_list()],
+    "price_sq_forecast": [
+        round(v, 0) for v in _index_df["price_sq_forecast"].to_list()
+    ],
+}
 
 
 def _append_tmp_log(record: dict) -> None:
@@ -271,6 +286,12 @@ def shutdown_event():
     _flush_to_persistent()
 
 
+@app.get("/index")
+def price_index():
+    """Quality-adjusted hedonic price index (2025-06 = 100) and price/m² level."""
+    return INDEX_PAYLOAD
+
+
 @app.get("/geocode")
 async def geocode(text: str = Query(..., min_length=2)):
     """Geocode an address string → lat/lon using the JS/Geocoder key."""
@@ -316,6 +337,7 @@ def form():
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
 <script src="https://api-maps.yandex.ru/2.1/?apikey={base_settings.YANDEX_MAPS_API_JS_KEY}&lang=ru_RU"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
@@ -578,6 +600,36 @@ def form():
     padding: 10px 14px;
     line-height: 1.5;
   }}
+
+  /* ── Charts ─────────────────────────────── */
+  .charts-section {{ margin-top: 28px; }}
+  .charts-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }}
+  @media (max-width: 900px) {{
+    .charts-grid {{ grid-template-columns: 1fr; }}
+  }}
+  .chart-box {{
+    display: flex;
+    flex-direction: column;
+  }}
+  .chart-box h3 {{
+    font-size: .9rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }}
+  .chart-box .chart-sub {{
+    font-size: .76rem;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }}
+  .chart-canvas-wrap {{
+    position: relative;
+    height: 320px;
+  }}
 </style>
 </head>
 <body>
@@ -706,6 +758,29 @@ def form():
   </div>
 
 </form>
+
+  <!-- ── CHARTS: hedonic price index ── -->
+  <div class="charts-section card">
+    <div class="section-title">Индекс цен на вторичное жильё — Москва и область</div>
+    <div class="charts-grid">
+      <div class="chart-box">
+        <h3>Качественно скорректированный индекс</h3>
+        <div class="chart-sub">База: июнь 2025 = 100</div>
+        <div class="chart-canvas-wrap"><canvas id="indexChart"></canvas></div>
+      </div>
+      <div class="chart-box">
+        <h3>Цена за м², ₽</h3>
+        <div class="chart-sub" id="price-chart-sub">Прогноз индексной модели по месяцам</div>
+        <div class="chart-canvas-wrap"><canvas id="priceChart"></canvas></div>
+      </div>
+    </div>
+    <div class="tip" style="margin-top:18px;">
+      Индекс изолирует чистый эффект времени: фиксируется набор характеристик квартир,
+      и модель оценивает, сколько они стоили бы в каждом месяце.
+      Рассчитайте стоимость своей квартиры — её цена за м² появится на правом графике.
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -766,6 +841,95 @@ function fmt(x, step) {{
   return (Math.round(x / step) * step).toLocaleString('ru-RU') + ' ₽';
 }}
 
+// ── Hedonic price-index charts (styled to match the page) ──
+const CHART_BLUE  = '#1a56db';
+const CHART_GREEN = '#059669';
+const CHART_RED   = '#dc2626';
+const CHART_GRID  = '#e2e8f0';
+const CHART_MUTED = '#64748b';
+let priceChart = null;
+
+Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.color = CHART_MUTED;
+
+function baseAxes(yTitle, tickFmt) {{
+  return {{
+    x: {{ grid: {{ color: CHART_GRID }}, ticks: {{ maxRotation: 45, minRotation: 45 }} }},
+    y: {{
+      grid: {{ color: CHART_GRID }},
+      title: {{ display: true, text: yTitle, color: CHART_MUTED }},
+      ticks: {{ callback: tickFmt }}
+    }}
+  }};
+}}
+
+async function renderCharts() {{
+  let d;
+  try {{
+    d = await (await fetch('/index')).json();
+  }} catch (e) {{
+    return;
+  }}
+
+  // Index chart (2025-06 = 100)
+  new Chart(document.getElementById('indexChart'), {{
+    type: 'line',
+    data: {{
+      labels: d.periods,
+      datasets: [{{
+        label: 'Индекс', data: d.index,
+        borderColor: CHART_BLUE, backgroundColor: 'rgba(26,86,219,.08)',
+        borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: CHART_BLUE,
+        tension: .25, fill: true
+      }}]
+    }},
+    options: {{
+      maintainAspectRatio: false,
+      plugins: {{ legend: {{ display: false }} }},
+      scales: baseAxes('Индекс (база = 100)', v => v)
+    }}
+  }});
+
+  // Price/m² chart — forecasted flat price overlaid later
+  priceChart = new Chart(document.getElementById('priceChart'), {{
+    type: 'line',
+    data: {{
+      labels: d.periods,
+      datasets: [
+        {{
+          label: 'Прогноз цены за м²', data: d.price_sq_forecast,
+          borderColor: CHART_GREEN, backgroundColor: 'rgba(5,150,105,.08)',
+          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: CHART_GREEN,
+          tension: .25, fill: true
+        }},
+        {{
+          label: 'Ваша квартира', data: [],
+          borderColor: CHART_RED, borderWidth: 2, borderDash: [6, 5],
+          pointRadius: 0, fill: false
+        }}
+      ]
+    }},
+    options: {{
+      maintainAspectRatio: false,
+      plugins: {{ legend: {{ display: true, position: 'top', labels: {{ boxWidth: 14, usePointStyle: true }} }} }},
+      scales: baseAxes('₽ / м²', v => (v / 1000).toFixed(0) + 'k')
+    }}
+  }});
+}}
+
+function showForecastOnChart(pricePerM2) {{
+  if (!priceChart) return;
+  const n = priceChart.data.labels.length;
+  priceChart.data.datasets[1].data = Array(n).fill(pricePerM2);
+  priceChart.data.datasets[1].label =
+    'Ваша квартира — ' + Math.round(pricePerM2).toLocaleString('ru-RU') + ' ₽/м²';
+  priceChart.update();
+  document.getElementById('price-chart-sub').textContent =
+    'Красная линия — оценка вашей квартиры';
+}}
+
+renderCharts();
+
 document.getElementById("form").onsubmit = async (e) => {{
   e.preventDefault();
   const btn = document.getElementById("submit-btn");
@@ -798,6 +962,7 @@ document.getElementById("form").onsubmit = async (e) => {{
       document.getElementById("r-sqm").textContent = fmt(r.price_per_m2, 1000);
       document.getElementById("r-total").textContent = fmt(r.price_total, 100000);
       resultCard.style.display = "block";
+      showForecastOnChart(r.price_per_m2);
     }}
   }} catch (err) {{
     errorList.innerHTML = '<li>Ошибка соединения: ' + err.message + '</li>';
