@@ -31,9 +31,8 @@ logging.basicConfig(
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-MODEL_PATH = BASE_DIR / "data/models_iep/model_2026_05_04.cbm"
-FEATURES_NAMES_PATH = BASE_DIR / "data/features_iep/features_meta.json"
-INDEX_PATH = BASE_DIR / "data/index_iep/hedonic_index.parquet"
+MODEL_PATH = BASE_DIR / "data/models_iep/model_hedonic.cbm"
+FEATURES_NAMES_PATH = BASE_DIR / "data/features_iep/features_meta_hedonic.json"
 
 TMP_LOG_PATH = Path("logs/requests_tmp.jsonl")  # written per-request while app runs
 PERSISTENT_LOG_PATH = Path("logs/requests.json")  # written on shutdown only
@@ -63,35 +62,22 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 model = CatBoostRegressor()
 model.load_model(MODEL_PATH)
 
-continous_features, categorical_features = pl.read_json(FEATURES_NAMES_PATH)
-continous_features = continous_features.item().to_list()
-categorical_features = categorical_features.item().to_list()
+# The served model carries a `year_month` time feature on top of the pipeline
+# features. Estimation predicts at the latest month; the per-flat hedonic index
+# varies only `year_month` with the flat's features fixed — so the curve's last
+# month equals the point estimate by construction.
+_meta = json.loads(FEATURES_NAMES_PATH.read_text(encoding="utf-8"))
+continous_features = _meta["continuous_features"]
+categorical_features = _meta["categorical_features"]
+TIME_FEATURE = _meta["time_feature"]  # "year_month"
+LATEST_MONTH = _meta["latest_month"]  # estimation anchor, e.g. "2026_06"
+HEDONIC_MONTHS = _meta["hedonic_months"]  # display range, base month first
 
-# Hedonic price index: shown from 2025-06 onwards, rebased so 2025-06 = 100.
-_index_df = pl.read_parquet(INDEX_PATH).filter(pl.col("year_month") >= "2025_06")
-_index_base = _index_df["price_sq_forecast"][0]
-_index_df = _index_df.with_columns(
-    (100 * pl.col("price_sq_forecast") / _index_base).alias("index")
-)
-INDEX_PAYLOAD = {
-    "periods": [p.replace("_", "-") for p in _index_df["year_month"].to_list()],
-    "index": [round(v, 2) for v in _index_df["index"].to_list()],
-    "price_sq_forecast": [
-        round(v, 0) for v in _index_df["price_sq_forecast"].to_list()
-    ],
-}
-
-# Per-flat hedonic path. The chosen flat's own features are held fixed and only
-# the time parameter is varied: the pure time effect is taken from the global
-# catboost hedonic index (the same index rebased so first shown month = 100).
-# The flat's ₽/m² for each month is its current catboost estimate scaled by the
-# index ratio to the latest month, so the latest point equals the present-day
-# prediction shown to the user.
-_INDEX_PERIODS = INDEX_PAYLOAD["periods"]
-_INDEX_VALUES = INDEX_PAYLOAD["index"]  # rebased: first shown month = 100
-_index_series = _index_df["index"].to_list()
-_index_latest = _index_series[-1]
-_INDEX_RATIO_TO_LATEST = [v / _index_latest for v in _index_series]
+# Feature columns fed to the model (pipeline features + time), and the full
+# categorical list including the time feature.
+_CAT_FEATURES = categorical_features + [TIME_FEATURE]
+_MODEL_FEATURES = continous_features + _CAT_FEATURES
+_INDEX_PERIODS = [m.replace("_", "-") for m in HEDONIC_MONTHS]
 
 
 def _append_tmp_log(record: dict) -> None:
@@ -244,24 +230,36 @@ def transform(data: FlatRequest):
         features = FeaturesService(df).calculate_features()
         features = features.select(continous_features + categorical_features)
 
+        # Cast categoricals to String so their values match the trained model
+        # (the model was trained with categorical columns as strings).
         features = features.with_columns(
-            [pl.col(categorical_features).fill_null("missing")]
+            [pl.col(categorical_features).cast(pl.String).fill_null("missing")]
         )
 
-        pool = Pool(features, cat_features=categorical_features)
+        # Hedonic path: replicate the flat once per month and vary only the time
+        # feature. One prediction covers every month plus the estimation.
+        month_features = features.join(
+            pl.DataFrame({TIME_FEATURE: HEDONIC_MONTHS}), how="cross"
+        ).select(_MODEL_FEATURES)
 
-        pred = np.exp(model.predict(pool))
-        price_sq = float(round(pred[0], 0))
+        pool = Pool(month_features, cat_features=_CAT_FEATURES)
+        month_price_sq = np.exp(model.predict(pool))
 
-        # Hedonic path for this exact flat: features fixed, only time varied.
-        flat_price_sq = [round(price_sq * r, 0) for r in _INDEX_RATIO_TO_LATEST]
+        # Estimation = prediction at the latest month (== last point of the curve).
+        latest_idx = HEDONIC_MONTHS.index(LATEST_MONTH)
+        price_sq = float(round(month_price_sq[latest_idx], 0))
+
+        # Per-flat index rebased so the first shown month = 100.
+        base = month_price_sq[0]
+        flat_index = [round(100 * p / base, 2) for p in month_price_sq]
+        flat_price_sq = [round(p, 0) for p in month_price_sq]
 
         response = {
             "price_per_m2": price_sq,
             "price_total": round(price_sq * data.total_square, 0),
             "hedonic": {
                 "periods": _INDEX_PERIODS,
-                "index": _INDEX_VALUES,
+                "index": flat_index,
                 "price_sq": flat_price_sq,
             },
         }
@@ -304,12 +302,6 @@ def transform(data: FlatRequest):
 @app.on_event("shutdown")
 def shutdown_event():
     _flush_to_persistent()
-
-
-@app.get("/index")
-def price_index():
-    """Quality-adjusted hedonic price index (2025-06 = 100) and price/m² level."""
-    return INDEX_PAYLOAD
 
 
 @app.get("/geocode")
