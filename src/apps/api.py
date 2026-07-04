@@ -81,6 +81,18 @@ INDEX_PAYLOAD = {
     ],
 }
 
+# Per-flat hedonic path. The chosen flat's own features are held fixed and only
+# the time parameter is varied: the pure time effect is taken from the global
+# catboost hedonic index (the same index rebased so first shown month = 100).
+# The flat's ₽/m² for each month is its current catboost estimate scaled by the
+# index ratio to the latest month, so the latest point equals the present-day
+# prediction shown to the user.
+_INDEX_PERIODS = INDEX_PAYLOAD["periods"]
+_INDEX_VALUES = INDEX_PAYLOAD["index"]  # rebased: first shown month = 100
+_index_series = _index_df["index"].to_list()
+_index_latest = _index_series[-1]
+_INDEX_RATIO_TO_LATEST = [v / _index_latest for v in _index_series]
+
 
 def _append_tmp_log(record: dict) -> None:
     with open(TMP_LOG_PATH, "a", encoding="utf-8") as f:
@@ -241,9 +253,17 @@ def transform(data: FlatRequest):
         pred = np.exp(model.predict(pool))
         price_sq = float(round(pred[0], 0))
 
+        # Hedonic path for this exact flat: features fixed, only time varied.
+        flat_price_sq = [round(price_sq * r, 0) for r in _INDEX_RATIO_TO_LATEST]
+
         response = {
             "price_per_m2": price_sq,
             "price_total": round(price_sq * data.total_square, 0),
+            "hedonic": {
+                "periods": _INDEX_PERIODS,
+                "index": _INDEX_VALUES,
+                "price_sq": flat_price_sq,
+            },
         }
 
         latency = (datetime.utcnow() - start_time).total_seconds()
@@ -759,25 +779,30 @@ def form():
 
 </form>
 
-  <!-- ── CHARTS: hedonic price index ── -->
+  <!-- ── CHARTS: per-flat hedonic index ── -->
   <div class="charts-section card">
-    <div class="section-title">Индекс цен на вторичное жильё — Москва и область</div>
-    <div class="charts-grid">
+    <div class="section-title">Гедонический индекс вашей квартиры</div>
+    <div id="charts-placeholder" class="tip">
+      Рассчитайте стоимость своей квартиры — модель зафиксирует её характеристики
+      и покажет, как менялась бы её цена во времени при изменении только временного
+      параметра.
+    </div>
+    <div class="charts-grid" id="charts-grid" style="display:none;">
       <div class="chart-box">
-        <h3>Качественно скорректированный индекс</h3>
+        <h3>Индекс стоимости вашей квартиры</h3>
         <div class="chart-sub">База: июнь 2025 = 100</div>
-        <div class="chart-canvas-wrap"><canvas id="indexChart"></canvas></div>
+        <div class="chart-canvas-wrap"><canvas id="flatIndexChart"></canvas></div>
       </div>
       <div class="chart-box">
-        <h3>Цена за м², ₽</h3>
-        <div class="chart-sub" id="price-chart-sub">Прогноз индексной модели по месяцам</div>
-        <div class="chart-canvas-wrap"><canvas id="priceChart"></canvas></div>
+        <h3>Цена за м² вашей квартиры, ₽</h3>
+        <div class="chart-sub">По месяцам, характеристики зафиксированы</div>
+        <div class="chart-canvas-wrap"><canvas id="flatPriceChart"></canvas></div>
       </div>
     </div>
     <div class="tip" style="margin-top:18px;">
-      Индекс изолирует чистый эффект времени: фиксируется набор характеристик квартир,
-      и модель оценивает, сколько они стоили бы в каждом месяце.
-      Рассчитайте стоимость своей квартиры — её цена за м² появится на правом графике.
+      Индекс изолирует чистый эффект времени: характеристики именно вашей квартиры
+      фиксируются, и модель CatBoost оценивает, сколько она стоила бы за м² в каждом
+      месяце. Последняя точка совпадает с текущей оценкой выше.
     </div>
   </div>
 
@@ -841,13 +866,13 @@ function fmt(x, step) {{
   return (Math.round(x / step) * step).toLocaleString('ru-RU') + ' ₽';
 }}
 
-// ── Hedonic price-index charts (styled to match the page) ──
+// ── Per-flat hedonic charts (styled to match the page) ──
 const CHART_BLUE  = '#1a56db';
 const CHART_GREEN = '#059669';
-const CHART_RED   = '#dc2626';
 const CHART_GRID  = '#e2e8f0';
 const CHART_MUTED = '#64748b';
-let priceChart = null;
+let flatIndexChart = null;
+let flatPriceChart = null;
 
 Chart.defaults.font.family = "'Inter', sans-serif";
 Chart.defaults.color = CHART_MUTED;
@@ -863,21 +888,18 @@ function baseAxes(yTitle, tickFmt) {{
   }};
 }}
 
-async function renderCharts() {{
-  let d;
-  try {{
-    d = await (await fetch('/index')).json();
-  }} catch (e) {{
-    return;
-  }}
+// Build/refresh the two per-flat charts from the /transform hedonic payload.
+function renderFlatCharts(h) {{
+  document.getElementById('charts-placeholder').style.display = 'none';
+  document.getElementById('charts-grid').style.display = 'grid';
 
-  // Index chart (2025-06 = 100)
-  new Chart(document.getElementById('indexChart'), {{
+  // Chart 1 — flat's own hedonic index (June 2025 = 100)
+  const indexCfg = {{
     type: 'line',
     data: {{
-      labels: d.periods,
+      labels: h.periods,
       datasets: [{{
-        label: 'Индекс', data: d.index,
+        label: 'Индекс', data: h.index,
         borderColor: CHART_BLUE, backgroundColor: 'rgba(26,86,219,.08)',
         borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: CHART_BLUE,
         tension: .25, fill: true
@@ -888,47 +910,40 @@ async function renderCharts() {{
       plugins: {{ legend: {{ display: false }} }},
       scales: baseAxes('Индекс (база = 100)', v => v)
     }}
-  }});
+  }};
 
-  // Price/m² chart — forecasted flat price overlaid later
-  priceChart = new Chart(document.getElementById('priceChart'), {{
+  // Chart 2 — flat's own price per m² over time
+  const priceCfg = {{
     type: 'line',
     data: {{
-      labels: d.periods,
-      datasets: [
-        {{
-          label: 'Прогноз цены за м²', data: d.price_sq_forecast,
-          borderColor: CHART_GREEN, backgroundColor: 'rgba(5,150,105,.08)',
-          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: CHART_GREEN,
-          tension: .25, fill: true
-        }},
-        {{
-          label: 'Ваша квартира', data: [],
-          borderColor: CHART_RED, borderWidth: 2, borderDash: [6, 5],
-          pointRadius: 0, fill: false
-        }}
-      ]
+      labels: h.periods,
+      datasets: [{{
+        label: 'Цена за м² вашей квартиры', data: h.price_sq,
+        borderColor: CHART_GREEN, backgroundColor: 'rgba(5,150,105,.08)',
+        borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: CHART_GREEN,
+        tension: .25, fill: true
+      }}]
     }},
     options: {{
       maintainAspectRatio: false,
-      plugins: {{ legend: {{ display: true, position: 'top', labels: {{ boxWidth: 14, usePointStyle: true }} }} }},
+      plugins: {{ legend: {{ display: false }} }},
       scales: baseAxes('₽ / м²', v => (v / 1000).toFixed(0) + 'k')
     }}
-  }});
-}}
+  }};
 
-function showForecastOnChart(pricePerM2) {{
-  if (!priceChart) return;
-  const n = priceChart.data.labels.length;
-  priceChart.data.datasets[1].data = Array(n).fill(pricePerM2);
-  priceChart.data.datasets[1].label =
-    'Ваша квартира — ' + Math.round(pricePerM2).toLocaleString('ru-RU') + ' ₽/м²';
-  priceChart.update();
-  document.getElementById('price-chart-sub').textContent =
-    'Красная линия — оценка вашей квартиры';
+  if (flatIndexChart) {{
+    flatIndexChart.data = indexCfg.data;
+    flatIndexChart.update();
+  }} else {{
+    flatIndexChart = new Chart(document.getElementById('flatIndexChart'), indexCfg);
+  }}
+  if (flatPriceChart) {{
+    flatPriceChart.data = priceCfg.data;
+    flatPriceChart.update();
+  }} else {{
+    flatPriceChart = new Chart(document.getElementById('flatPriceChart'), priceCfg);
+  }}
 }}
-
-renderCharts();
 
 document.getElementById("form").onsubmit = async (e) => {{
   e.preventDefault();
@@ -962,7 +977,7 @@ document.getElementById("form").onsubmit = async (e) => {{
       document.getElementById("r-sqm").textContent = fmt(r.price_per_m2, 1000);
       document.getElementById("r-total").textContent = fmt(r.price_total, 100000);
       resultCard.style.display = "block";
-      showForecastOnChart(r.price_per_m2);
+      if (r.hedonic) renderFlatCharts(r.hedonic);
     }}
   }} catch (err) {{
     errorList.innerHTML = '<li>Ошибка соединения: ' + err.message + '</li>';

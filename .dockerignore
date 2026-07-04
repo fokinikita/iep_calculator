@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.venv
+venv
+__pycache__
+*.pyc
+catboost_info
+*.log
+logs/
+.env
+.env.*
+!default.env
+Dockerfile
+.dockerignore
+README.md
